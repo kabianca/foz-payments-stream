@@ -1,0 +1,55 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Spark 4.1, Delta 4.4, Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      TZ: UTC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # delta-spark resolves its jars through Ivy on the first SparkSession.
+      # Caching ~/.ivy2 keeps that off the critical path on later runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ivy2
+          key: ivy-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Installed versions
+        run: pip list | grep -Ei "pyspark|delta-spark|confluent-kafka|pytest" || true
+
+      - name: Run the test suite
+        run: python -m pytest -q
