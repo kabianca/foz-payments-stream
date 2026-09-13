@@ -1,0 +1,12 @@
+docs/design.md
+.env
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.idea/
+spark-warehouse/
+metastore_db/
+derby.log
