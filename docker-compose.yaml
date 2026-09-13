@@ -1,0 +1,95 @@
+# Foz: Kafka (KRaft) -> Spark Structured Streaming -> Delta, on one laptop.
+#
+# Memory is the constraint this file is written around: Kafka is capped at a
+# 512 MB heap and Spark runs local[2] with a 1 GB driver. Delta tables and the
+# checkpoint live on ./data so they survive `docker compose down` and can be
+# read from the host.
+
+x-foz-env: &foz-env
+  FOZ_BOOTSTRAP_SERVERS: kafka:9092
+  FOZ_TOPIC: ${FOZ_TOPIC:-payments}
+  FOZ_WINDOW_SECONDS: ${FOZ_WINDOW_SECONDS:-60}
+  FOZ_ALLOWED_LATENESS_SECONDS: ${FOZ_ALLOWED_LATENESS_SECONDS:-120}
+
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Fixed so the persisted log directory matches on every restart.
+      CLUSTER_ID: 05--GKrTVu-wf7h_U36HJg
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Creates the topic once. Auto-creation is off so a typo in a topic name
+  # fails instead of quietly producing into a topic nobody reads.
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      FOZ_TOPIC: ${FOZ_TOPIC:-payments}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists --topic "$$FOZ_TOPIC" --partitions 3 --replication-factor 1
+
+  stream:
+    build:
+      context: .
+      dockerfile: docker/stream.Dockerfile
+    image: foz-stream
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *foz-env
+      FOZ_DELTA_ROOT: /data/delta
+      FOZ_CHECKPOINT_ROOT: /data/checkpoints
+      FOZ_TRIGGER_SECONDS: ${FOZ_TRIGGER_SECONDS:-5}
+    user: "${FOZ_UID:-1000}:0"
+    volumes:
+      - ./data:/data
+      - ./foz:/opt/foz/foz:ro
+    # Dies loudly and comes back: this is what `make kill` relies on.
+    restart: unless-stopped
+
+  producer:
+    build:
+      context: .
+      dockerfile: docker/producer.Dockerfile
+    image: foz-producer
+    profiles: ["tools"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *foz-env
+    volumes:
+      - ./foz:/opt/foz/foz:ro
+
+volumes:
+  kafka-data:
